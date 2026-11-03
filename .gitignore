@@ -1,0 +1,73 @@
+# ==============================================================================
+# FICSIT PRODUCTION OPTIMIZER - .gitignore
+# ==============================================================================
+
+# --- Toolchains locales y entornos auxiliares ---
+# Toolchain local de Nim (evita añadir los ~190 MB de binarios al repo)
+/.nim_toolchain/
+/.choosenim/
+/.nimble/
+
+# --- Caché y artefactos de compilación Nim ---
+nimcache/
+*.nimcache/
+*.exe
+*.out
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+
+# --- Código compilado generado para Web (reproducible con ./scripts/build.sh) ---
+# Nota: Si deseas subir el bundle a GitHub Pages directamente sin GitHub Actions,
+# puedes comentar la siguiente línea o usar: git add -f web/app.js
+web/app.js
+*.js.map
+
+# --- Python (servidor local scripts/serve.sh y scripts auxiliares) ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.venv/
+venv/
+ENV/
+env/
+
+# --- Node / npm (por si se usan dependencias JS adicionales) ---
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Archivos de configuración de IDEs y Editores ---
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.directory
+
+# --- Archivos del Sistema Operativo ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+
+# --- Registros y temporales ---
+*.log
+*.tmp
+*.temp
+scratch/
+.cache/
+

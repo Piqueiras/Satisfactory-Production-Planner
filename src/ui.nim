@@ -1,4 +1,4 @@
-import std/[dom, strutils, strformat, tables, sets, sequtils, algorithm, math]
+import std/[dom, strutils, strformat, tables, sets, sequtils, algorithm, math, json]
 import types, dataset, planner, presets, svg_graph
 
 type
@@ -15,167 +15,290 @@ proc findClosest(target: Node, selector: cstring): Element =
   """.}
   return res
 
+proc getStorageItem(key: cstring): cstring =
+  var res: cstring = nil
+  {.emit: """
+    try {
+      `res` = window.localStorage ? window.localStorage.getItem(`key`) : null;
+    } catch(e) {
+      `res` = null;
+    }
+  """.}
+  return res
+
+proc setStorageItem(key: cstring, val: cstring) =
+  {.emit: """
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(`key`, `val`);
+      }
+    } catch(e) {}
+  """.}
+
+proc generateFactoryId(): string =
+  var res: cstring
+  {.emit: """
+    `res` = "factory-" + Date.now().toString(36) + "-" + Math.random().toString(36).substring(2, 6);
+  """.}
+  return $res
+
 var
-  currentTargets: seq[FactoryTarget] = @[]
-  enabledAlternates: HashSet[string] = initHashSet[string]()
-  allowAllAlternates: bool = false
-  currentTab: string = "overview"
-  graphViewMode: string = "svg"
+  factories: seq[Factory] = @[]
+  activeFactoryId: string = ""
   currentPlan: FactoryPlan
+  currentTab: string = "production" # "production", "graph", "alternates", "database"
+  graphViewMode: string = "svg"     # "svg" or "board"
   altSearchQuery: string = ""
   dbSearchQuery: string = ""
+  eventsBound = false
 
 proc escapeHtml(s: string): string =
   result = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
 
-proc setHtml(idStr: string, htmlStr: string) =
-  let el = document.getElementById(cstring(idStr))
-  if el != nil:
-    el.innerHTML = cstring(htmlStr)
+proc getActiveFactoryIdx(): int =
+  for i in 0 ..< factories.len:
+    if factories[i].id == activeFactoryId:
+      return i
+  return 0
 
-proc getInputValue(idStr: string): string =
-  let el = document.getElementById(cstring(idStr))
-  if el != nil:
-    return $cast[InputElement](el).value
-  return ""
+proc getActiveFactory(): ptr Factory =
+  if factories.len == 0: return nil
+  let idx = getActiveFactoryIdx()
+  return addr factories[idx]
 
-proc setInputValue(idStr: string, valStr: string) =
-  let el = document.getElementById(cstring(idStr))
-  if el != nil:
-    cast[InputElement](el).value = cstring(valStr)
+proc saveFactories() =
+  try:
+    let jsonNode = %factories
+    setStorageItem(cstring("satisfactory_factories_v2"), cstring($jsonNode))
+    setStorageItem(cstring("satisfactory_active_factory_v2"), cstring(activeFactoryId))
+  except Exception:
+    discard
+
+proc getAllRawResourceIds(): seq[string] =
+  result = @[]
+  for r in rawResourceIds:
+    result.add(r)
+  result.sort(proc(a, b: string): int = cmp(getItemName(a), getItemName(b)))
+
+proc createDefaultFactory(idStr, nameStr: string): Factory =
+  return Factory(
+    id: idStr,
+    name: nameStr,
+    targets: @[
+      FactoryTarget(itemId: "rotor", rate: 10.0),
+      FactoryTarget(itemId: "smart-plating", rate: 2.0)
+    ],
+    allowedRaw: getAllRawResourceIds(),
+    enabledAlts: @[],
+    disabledRecipes: @[]
+  )
+
+proc loadFactories(): bool =
+  let raw = getStorageItem(cstring("satisfactory_factories_v2"))
+  if raw != nil and $raw != "":
+    try:
+      let parsed = parseJson($raw)
+      factories = to(parsed, seq[Factory])
+      let act = getStorageItem(cstring("satisfactory_active_factory_v2"))
+      if act != nil and $act != "":
+        activeFactoryId = $act
+      if factories.len > 0:
+        if activeFactoryId == "" or not factories.anyIt(it.id == activeFactoryId):
+          activeFactoryId = factories[0].id
+        return true
+    except Exception:
+      discard
+  return false
+
+proc updatePlan*() =
+  if factories.len == 0:
+    currentPlan = FactoryPlan()
+    return
+  let idx = getActiveFactoryIdx()
+  let f = factories[idx]
+  currentPlan = planProduction(
+    f.targets,
+    f.allowedRaw.toHashSet(),
+    f.enabledAlts.toHashSet(),
+    f.disabledRecipes.toHashSet()
+  )
 
 # Forward declarations
 proc renderApp*()
-proc updatePlan*()
-proc bindGlobalEvents*()
+proc initGraphInteractions()
 
-proc renderTargetsBar(): string =
-  var html = "<div class='targets-container'>"
-  html.add("<div class='targets-input-row'>")
+proc renderFactoryBar(): string =
+  var html = "<div class='factory-bar'>"
   
-  # Select item dropdown
-  html.add("<div class='input-group'>")
-  html.add("<label for='target-item-select'>Select Product:</label>")
-  html.add("<select id='target-item-select' class='ficsit-select'>")
+  # 1. Factory Tabs
+  html.add("<div class='factory-tabs-container'>")
+  html.add("<div class='factory-tabs'>")
+  for f in factories:
+    let isActive = f.id == activeFactoryId
+    let actClass = if isActive: "factory-tab active" else: "factory-tab"
+    html.add(fmt"<div class='{actClass}' data-factory-id='{f.id}'>")
+    html.add(fmt"<span class='factory-tab-name'>{escapeHtml(f.name)}</span>")
+    if factories.len > 1:
+      html.add(fmt"<button class='btn-tab-close' data-factory-id='{f.id}' title='Eliminar fábrica'>✕</button>")
+    html.add("</div>")
+  
+  html.add("<button id='btn-new-factory' class='btn-new-factory' title='Crear nueva fábrica independiente'>+ Nueva Fábrica</button>")
+  html.add("</div>") # factory-tabs
+  html.add("</div>") # factory-tabs-container
+
+  # 2. Active Factory Toolbar Actions
+  let fPtr = getActiveFactory()
+  if fPtr != nil:
+    let f = fPtr[]
+    html.add("<div class='factory-meta-row'>")
+    
+    # Inline rename input
+    html.add("<div class='factory-name-field'>")
+    html.add("<label for='factory-name-input'>Fábrica:</label>")
+    html.add(fmt"<input id='factory-name-input' type='text' value='{escapeHtml(f.name)}' class='ficsit-input name-input' placeholder='Nombre de la fábrica...' />")
+    html.add("</div>")
+
+    # Action buttons: Duplicate, Delete, Presets
+    html.add("<div class='factory-actions-group'>")
+    html.add("<button id='btn-duplicate-factory' class='ficsit-btn btn-sm btn-secondary' title='Duplicar esta fábrica con su configuración actual'>📋 Duplicar</button>")
+    if factories.len > 1:
+      html.add("<button id='btn-delete-factory' class='ficsit-btn btn-sm btn-danger' title='Eliminar esta fábrica'>🗑️ Eliminar</button>")
+    
+    # Presets dropdown
+    html.add("<select id='preset-select' class='ficsit-select select-sm preset-picker'>")
+    html.add("<option value=''>-- Cargar Plantilla --</option>")
+    for p in getPresets():
+      html.add(fmt"<option value='{p.id}'>{escapeHtml(p.name)}</option>")
+    html.add("</select>")
+
+    html.add("</div>") # factory-actions-group
+    html.add("</div>") # factory-meta-row
+
+  html.add("</div>") # factory-bar
+  return html
+
+proc renderFactoryConfig(): string =
+  let fPtr = getActiveFactory()
+  if fPtr == nil: return ""
+  let f = fPtr[]
+
+  var html = "<div class='factory-config-panel'>"
+
+  # Column 1: Production Targets
+  html.add("<div class='config-section targets-section'>")
+  html.add("<div class='section-header'>")
+  html.add("<h4>🎯 Objetivos de Producción</h4>")
+  html.add(fmt"<span class='section-subtitle'>{f.targets.len} producto(s) en demanda</span>")
+  html.add("</div>")
+
+  # Add product row
+  html.add("<div class='target-add-row'>")
+  html.add("<select id='target-item-select' class='ficsit-select select-item'>")
   for idStr in craftableItemIds:
     let item = allItems[idStr]
     html.add(fmt"<option value='{idStr}'>{escapeHtml(item.name)} ({item.category})</option>")
   html.add("</select>")
-  html.add("</div>")
-
-  # Target rate input
-  html.add("<div class='input-group rate-group'>")
-  html.add("<label for='target-rate-input'>Target Rate (items/min):</label>")
-  html.add("<div class='rate-input-wrapper'>")
-  html.add("<input id='target-rate-input' type='number' min='0.1' step='1' value='10' class='ficsit-input' />")
+  
+  html.add("<div class='rate-input-wrap'>")
+  html.add("<input id='target-rate-input' type='number' min='0.1' step='1' value='10' class='ficsit-input rate-input' />")
   html.add("<span class='rate-unit'>/ min</span>")
   html.add("</div>")
-  html.add("</div>")
 
-  # Add Button
-  html.add("<button id='btn-add-target' class='ficsit-btn btn-primary'>+ Add Product</button>")
+  html.add("<button id='btn-add-target' class='ficsit-btn btn-primary btn-sm'>+ Añadir</button>")
+  html.add("</div>") # target-add-row
 
-  # Presets dropdown
-  html.add("<div class='input-group presets-group'>")
-  html.add("<label for='preset-select'>Factory Presets:</label>")
-  html.add("<select id='preset-select' class='ficsit-select preset-select'>")
-  html.add("<option value=''>-- Load Preset Factory --</option>")
-  for p in getPresets():
-    html.add(fmt"<option value='{p.id}'>{escapeHtml(p.name)}</option>")
-  html.add("</select>")
-  html.add("</div>")
-
-  html.add("</div>") # targets-input-row
-
-  # Active target chips
-  html.add("<div class='active-targets-list'>")
-  if currentTargets.len == 0:
-    html.add("<div class='no-targets-hint'>No active production targets. Select a product and click <strong>+ Add Product</strong> or choose a <strong>Preset</strong> above!</div>")
+  # Active targets table / chips
+  html.add("<div class='active-targets-wrap'>")
+  if f.targets.len == 0:
+    html.add("<div class='targets-empty-hint'>Sin objetivos. Selecciona un producto arriba y pulsa <strong>+ Añadir</strong> o carga una plantilla.</div>")
   else:
-    for idx, t in currentTargets:
+    html.add("<div class='targets-chips-grid'>")
+    for idx, t in f.targets:
       let item = allItems.getOrDefault(t.itemId, Item(name: t.itemId, color: "#FA9549"))
       html.add("<div class='target-chip'>")
-      html.add(fmt"<span class='chip-color' style='background-color: {item.color};'></span>")
-      html.add(fmt"<span class='chip-name'>{escapeHtml(item.name)}:</span>")
-      html.add(fmt"<span class='chip-rate'>{t.rate:.1f} / min</span>")
+      html.add(fmt"<span class='chip-stripe' style='background-color: {item.color};'></span>")
+      html.add(fmt"<span class='chip-name'>{escapeHtml(item.name)}</span>")
+      html.add(fmt"<span class='chip-rate'>{t.rate:.1f} <small>/m</small></span>")
       html.add(fmt"<button class='chip-step-btn' data-action='dec' data-idx='{idx}' title='-5/min'>-5</button>")
       html.add(fmt"<button class='chip-step-btn' data-action='inc' data-idx='{idx}' title='+5/min'>+5</button>")
-      html.add(fmt"<button class='chip-remove-btn' data-idx='{idx}' title='Remove'>✕</button>")
+      html.add(fmt"<button class='chip-remove-btn' data-idx='{idx}' title='Eliminar objetivo'>✕</button>")
       html.add("</div>")
-    html.add("<button id='btn-clear-targets' class='ficsit-btn btn-danger btn-sm'>Clear All</button>")
+    html.add("</div>")
+  html.add("</div>") # active-targets-wrap
+  html.add("</div>") # targets-section
 
-  html.add("</div>") # active-targets-list
-  html.add("</div>") # targets-container
+  # Column 2: Available Raw Resources at this location
+  html.add("<div class='config-section resources-section'>")
+  html.add("<div class='section-header'>")
+  html.add("<div>")
+  html.add("<h4>⛏️ Recursos Naturales Disponibles en esta Ubicación</h4>")
+  html.add("<span class='section-subtitle'>Haz clic para deshabilitar recursos que no existan cerca de esta fábrica</span>")
+  html.add("</div>")
+  html.add("<div class='raw-quick-actions'>")
+  html.add("<button id='btn-raw-all' class='btn-text-action'>Todos</button>")
+  html.add("<button id='btn-raw-none' class='btn-text-action'>Ninguno</button>")
+  html.add("</div>")
+  html.add("</div>") # section-header
+
+  # Raw resource pills
+  html.add("<div class='raw-pills-grid'>")
+  let allRaws = getAllRawResourceIds()
+  for rId in allRaws:
+    let isAllowed = f.allowedRaw.contains(rId)
+    let pillClass = if isAllowed: "raw-pill active" else: "raw-pill disabled"
+    let checkSymbol = if isAllowed: "✓" else: "✕"
+    let rName = getItemName(rId)
+    html.add(fmt"<button class='{pillClass}' data-raw-id='{rId}' title='Alternar disponibilidad de {escapeHtml(rName)}'>")
+    html.add(fmt"<span class='raw-pill-icon'>{checkSymbol}</span> ")
+    html.add(fmt"<span class='raw-pill-text'>{escapeHtml(rName)}</span>")
+    html.add("</button>")
+  html.add("</div>") # raw-pills-grid
+  html.add("</div>") # resources-section
+
+  html.add("</div>") # factory-config-panel
   return html
 
-proc renderOverviewTab(): string =
-  var html = "<div class='tab-content overview-tab'>"
+proc renderTabBar(): string =
+  let fPtr = getActiveFactory()
+  let altCount = if fPtr != nil: fPtr[].enabledAlts.len else: 0
+
+  var html = "<div class='ficsit-tabs main-tabs'>"
+  proc addTabBtn(tabId, icon, label: string) =
+    let activeClass = if currentTab == tabId: "tab-btn active" else: "tab-btn"
+    html.add(fmt"<button class='{activeClass}' data-tab='{tabId}'>{icon} {label}</button>")
+
+  addTabBtn("production", "📋", "Plan de Producción")
+  addTabBtn("graph", "📈", "Diagrama de Flujo")
+  addTabBtn("alternates", "🛠️", "Recetas Alternativas (" & $altCount & ")")
+  addTabBtn("database", "📖", "Enciclopedia 1.0")
+  html.add("</div>")
+  return html
+
+proc renderProductionTab(): string =
+  var html = "<div class='tab-content production-tab'>"
 
   if not currentPlan.success:
-    html.add(fmt"<div class='ficsit-alert alert-error'>⚠️ <strong>Calculation Error:</strong> {escapeHtml(currentPlan.errorMessage)}</div>")
+    html.add(fmt"<div class='ficsit-alert alert-error'>⚠️ <strong>No se pudo calcular el plan:</strong> {escapeHtml(currentPlan.errorMessage)}</div>")
     return html & "</div>"
 
-  if currentTargets.len == 0:
-    html.add("<div class='empty-placeholder'>Select at least one product target above to calculate factory requirements.</div>")
+  let fPtr = getActiveFactory()
+  if fPtr == nil or fPtr[].targets.len == 0:
+    html.add("<div class='empty-placeholder'>Esta fábrica no tiene objetivos de producción. Añade productos arriba para calcular las materias primas y las máquinas necesarias.</div>")
     return html & "</div>"
 
-  # Metrics Cards Grid
-  html.add("<div class='metrics-grid'>")
-  
-  # Metric 1: Total Power
-  html.add("<div class='metric-card card-power'>")
-  html.add("<div class='metric-icon'>⚡</div>")
-  html.add("<div class='metric-info'>")
-  html.add("<span class='metric-title'>TOTAL FACTORY POWER</span>")
-  html.add(fmt"<span class='metric-value'>{currentPlan.totalPowerMW:.1f} <small>MW</small></span>")
-  html.add(fmt"<span class='metric-sub'>~{(currentPlan.totalPowerMW / 75.0):.1f} Coal Generators</span>")
-  html.add("</div>")
+  # Power consumption summary badge
+  html.add("<div class='production-summary-strip'>")
+  html.add(fmt"<span class='power-summary'>⚡ Potencia requerida: <strong>{currentPlan.totalPowerMW:.1f} MW</strong></span>")
   html.add("</div>")
 
-  # Metric 2: Total Buildings
-  html.add("<div class='metric-card card-buildings'>")
-  html.add("<div class='metric-icon'>🏭</div>")
-  html.add("<div class='metric-info'>")
-  html.add("<span class='metric-title'>PRODUCTION BUILDINGS</span>")
-  html.add(fmt"<span class='metric-value'>{currentPlan.totalBuildings:.1f} <small>machines</small></span>")
-  html.add(fmt"<span class='metric-sub'>{currentPlan.steps.len} unique recipe stages</span>")
+  # Table 1: Raw Materials Required
+  html.add("<div class='content-card'>")
+  html.add("<div class='card-header'>")
+  html.add("<h3>⛏️ Materias Primas Requeridas (por minuto)</h3>")
   html.add("</div>")
-  html.add("</div>")
-
-  # Metric 3: Raw Resources
-  html.add("<div class='metric-card card-resources'>")
-  html.add("<div class='metric-icon'>⛏️</div>")
-  html.add("<div class='metric-info'>")
-  html.add("<span class='metric-title'>RAW RESOURCE TYPES</span>")
-  html.add(fmt"<span class='metric-value'>{currentPlan.rawResources.len} <small>resources</small></span>")
-  html.add("<span class='metric-sub'>Extracted from world nodes</span>")
-  html.add("</div>")
-  html.add("</div>")
-
-  # Metric 4: Byproducts
-  html.add("<div class='metric-card card-byproducts'>")
-  html.add("<div class='metric-icon'>♻️</div>")
-  html.add("<div class='metric-info'>")
-  html.add("<span class='metric-title'>BYPRODUCTS & SURPLUS</span>")
-  if currentPlan.byproducts.len == 0:
-    html.add("<span class='metric-value'>0 <small>waste</small></span>")
-    html.add("<span class='metric-sub'>100% Balanced Factory</span>")
-  else:
-    html.add(fmt"<span class='metric-value'>{currentPlan.byproducts.len} <small>items</small></span>")
-    html.add("<span class='metric-sub'>Recycled or Sinkable</span>")
-  html.add("</div>")
-  html.add("</div>")
-
-  html.add("</div>") # metrics-grid
-
-  # Two-column layout: Raw Resources & Machine Breakdown
-  html.add("<div class='overview-columns'>")
-
-  # Left Column: Raw Resources Shopping List
-  html.add("<div class='column-box'>")
-  html.add("<h3 class='column-title'>⛏️ Raw Materials Required (per minute)</h3>")
+  html.add("<div class='table-responsive'>")
   html.add("<table class='ficsit-table'>")
-  html.add("<thead><tr><th>Resource</th><th>Rate Required</th><th>Suggested Miners / Extractors</th></tr></thead>")
+  html.add("<thead><tr><th>Recurso</th><th>Extracción Requerida</th><th>Sugerencia de Mineros / Extractores</th></tr></thead>")
   html.add("<tbody>")
   for req in currentPlan.rawResources:
     let color = getItemColor(req.itemId)
@@ -184,55 +307,24 @@ proc renderOverviewTab(): string =
     html.add(fmt"<td class='text-bold'>{req.rate:.1f} / min</td>")
     html.add(fmt"<td><span class='miner-tag'>{escapeHtml(req.suggestedMiners)}</span></td>")
     html.add("</tr>")
-  html.add("</tbody></table>")
+  html.add("</tbody></table></div>")
+  html.add("</div>") # content-card
+
+  # Table 2: Production Lines & Machines
+  html.add("<div class='content-card' style='margin-top: 18px;'>")
+  html.add("<div class='card-header'>")
+  html.add("<h3>🏭 Líneas de Producción y Máquinas</h3>")
   html.add("</div>")
-
-  # Right Column: Machine Type Summary
-  var machineCounts = initTable[string, float]()
-  var machinePower = initTable[string, float]()
-  for st in currentPlan.steps:
-    machineCounts[st.machineName] = machineCounts.getOrDefault(st.machineName, 0.0) + st.buildingCount
-    machinePower[st.machineName] = machinePower.getOrDefault(st.machineName, 0.0) + st.powerMW
-
-  html.add("<div class='column-box'>")
-  html.add("<h3 class='column-title'>🏭 Machine Inventory Required</h3>")
-  html.add("<table class='ficsit-table'>")
-  html.add("<thead><tr><th>Machine Type</th><th>Count</th><th>Power</th></tr></thead>")
-  html.add("<tbody>")
-  for mName, count in machineCounts:
-    let mw = machinePower.getOrDefault(mName, 0.0)
-    html.add("<tr>")
-    html.add(fmt"<td><strong>{escapeHtml(mName)}</strong></td>")
-    html.add(fmt"<td class='text-bold'>{count:.2f} (⌈{int(ceil(count))}⌉)</td>")
-    html.add(fmt"<td>{mw:.1f} MW</td>")
-    html.add("</tr>")
-  html.add("</tbody></table>")
-  html.add("</div>")
-
-  html.add("</div>") # overview-columns
-  html.add("</div>") # tab-content
-  return html
-
-proc renderStepsTab(): string =
-  var html = "<div class='tab-content steps-tab'>"
-  if not currentPlan.success or currentPlan.steps.len == 0:
-    html.add("<div class='empty-placeholder'>No production steps to display. Add targets above to calculate the factory plan.</div>")
-    return html & "</div>"
-
-  html.add("<div class='table-header-info'>")
-  html.add(fmt"<span>Showing <strong>{currentPlan.steps.len}</strong> production stages. Machines can be underclocked or balanced.</span>")
-  html.add("</div>")
-
   html.add("<div class='table-responsive'>")
-  html.add("<table class='ficsit-table steps-table'>")
+  html.add("<table class='ficsit-table'>")
   html.add("<thead><tr>")
-  html.add("<th>Recipe</th>")
-  html.add("<th>Machine</th>")
-  html.add("<th>Quantity</th>")
-  html.add("<th>Clock Speed Recommendation</th>")
-  html.add("<th>Power</th>")
-  html.add("<th>Inputs (per min)</th>")
-  html.add("<th>Outputs (per min)</th>")
+  html.add("<th>Receta</th>")
+  html.add("<th>Edificio</th>")
+  html.add("<th>Cantidad</th>")
+  html.add("<th>Ajuste de Reloj</th>")
+  html.add("<th>Potencia</th>")
+  html.add("<th>Entradas (por min)</th>")
+  html.add("<th>Salidas (por min)</th>")
   html.add("</tr></thead>")
   html.add("<tbody>")
 
@@ -261,7 +353,36 @@ proc renderStepsTab(): string =
     html.add("</tr>")
 
   html.add("</tbody></table></div>")
-  html.add("</div>")
+  html.add("</div>") # content-card
+
+  # Table 3: Byproducts & Surplus (only rendered if there are byproducts!)
+  if currentPlan.byproducts.len > 0:
+    html.add("<div class='content-card' style='margin-top: 18px;'>")
+    html.add("<div class='card-header'>")
+    html.add("<h3>♻️ Subproductos y Excedentes de Producción</h3>")
+    html.add("</div>")
+    html.add("<div class='table-responsive'>")
+    html.add("<table class='ficsit-table'>")
+    html.add("<thead><tr><th>Subproducto</th><th>Tasa Sobrante</th><th>Directriz de Manejo</th></tr></thead>")
+    html.add("<tbody>")
+    for sur in currentPlan.byproducts:
+      html.add("<tr>")
+      html.add(fmt"<td><strong>{escapeHtml(sur.itemName)}</strong></td>")
+      html.add(fmt"<td class='text-bold text-highlight'>+{sur.rate:.2f} / min</td>")
+      let directive = if sur.itemId == "water":
+                        "Recircular al inicio del proceso (Alúmina) mediante unión en T o purgar a Generador de Carbón."
+                      elif sur.itemId == "polymer-resin":
+                        "Convertir en Plástico/Goma en una refinería secundaria o enviar a AWESOME Sink."
+                      elif sur.itemId == "heavy-oil-residue":
+                        "Procesar a Coque de Petróleo o Combustible Diluido, o empaquetar y hundir."
+                      else:
+                        "Derivar excedente mediante Divisor Inteligente (Desbordamiento) a Triturador AWESOME."
+      html.add(fmt"<td>{escapeHtml(directive)}</td>")
+      html.add("</tr>")
+    html.add("</tbody></table></div>")
+    html.add("</div>")
+
+  html.add("</div>") # tab-content
   return html
 
 proc renderGraphTab(): string =
@@ -288,7 +409,7 @@ proc renderGraphTab(): string =
 
   if graphViewMode == "svg":
     html.add("<div class='graph-hint' style='margin-bottom: 12px;'>")
-    html.add("<span>💡 <strong>Interacción FICSIT:</strong> Arrastra cualquier nodo con el ratón para ordenar el diagrama libremente. Pasa el cursor sobre un nodo para iluminar sus conexiones.</span>")
+    html.add("<span>💡 <strong>Interacción:</strong> Arrastra cualquier nodo con el ratón para ordenar el diagrama libremente. Pasa el cursor sobre un nodo para iluminar sus conexiones.</span>")
     html.add("</div>")
     html.add("<div class='svg-viewport' id='svg-container'>")
     html.add(renderSvgGraph(currentPlan))
@@ -299,55 +420,25 @@ proc renderGraphTab(): string =
   html.add("</div>") # tab-content
   return html
 
-proc renderByproductsTab(): string =
-  var html = "<div class='tab-content byproducts-tab'>"
-  html.add("<div class='byproduct-header'>")
-  html.add("<h3>♻️ Byproducts, Recycling Loops & AWESOME Sink Analysis</h3>")
-  html.add("<p>Satisfactory has complex multi-output recipes (such as Aluminum scrap water loops, Oil refining Heavy Oil Residue / Polymer Resin, Nuclear waste, and Rocket fuel). The linear programming solver automatically prioritizes feeding byproducts back into production before mining fresh raw resources.</p>")
-  html.add("</div>")
-
-  if currentPlan.byproducts.len == 0:
-    html.add("<div class='ficsit-alert alert-success'>✅ <strong>Zero Waste Factory:</strong> All intermediate byproducts are 100% consumed and recycled internally within the production line!</div>")
-  else:
-    html.add("<table class='ficsit-table'>")
-    html.add("<thead><tr><th>Surplus Item</th><th>Surplus Rate (per min)</th><th>Handling Status</th><th>FICSIT Directive</th></tr></thead>")
-    html.add("<tbody>")
-    for sur in currentPlan.byproducts:
-      html.add("<tr>")
-      html.add(fmt"<td><strong>{escapeHtml(sur.itemName)}</strong></td>")
-      html.add(fmt"<td class='text-bold text-highlight'>+{sur.rate:.2f} / min</td>")
-      html.add(fmt"<td><span class='status-pill'>{escapeHtml(sur.status)}</span></td>")
-      let directive = if sur.itemId == "water":
-                        "Loop water back into Alumina Solution with VIP junction or flush excess into Coal Power."
-                      elif sur.itemId == "polymer-resin":
-                        "Convert into Plastic/Rubber in a secondary Refinery or route to AWESOME Sink."
-                      elif sur.itemId == "heavy-oil-residue":
-                        "Refine into Petroleum Coke or Diluted Fuel, or package and sink."
-                      else:
-                        "Send overflow via Smart Splitter (Overflow) to AWESOME Sink for FICSIT coupons."
-      html.add(fmt"<td>{escapeHtml(directive)}</td>")
-      html.add("</tr>")
-    html.add("</tbody></table>")
-
-  html.add("</div>")
-  return html
-
 proc renderAlternatesTab(): string =
+  let fPtr = getActiveFactory()
+  let enabledAlts = if fPtr != nil: fPtr[].enabledAlts.toHashSet() else: initHashSet[string]()
+
   var html = "<div class='tab-content alternates-tab'>"
   html.add("<div class='alternates-header'>")
   html.add("<div>")
-  html.add("<h3>🛠️ Satisfactory 1.0 Alternate Recipes Manager</h3>")
-  html.add("<p>Toggle alternate recipes discovered from Hard Drives in Crash Sites. The optimizer automatically incorporates enabled recipes to minimize machines and raw resources.</p>")
+  html.add("<h3>🛠️ Recetas Alternativas para esta Fábrica</h3>")
+  html.add("<span class='section-subtitle'>Activa las recetas de discos duros permitidas en esta fábrica. El optimizador las utilizará si reducen recursos o máquinas.</span>")
   html.add("</div>")
   html.add("<div class='alts-actions'>")
-  html.add("<button id='btn-enable-all-alts' class='ficsit-btn btn-secondary'>Enable All Alternates</button>")
-  html.add("<button id='btn-disable-all-alts' class='ficsit-btn btn-secondary'>Disable All Alternates (Standard Only)</button>")
+  html.add("<button id='btn-enable-all-alts' class='ficsit-btn btn-secondary btn-sm'>Activar Todas</button>")
+  html.add("<button id='btn-disable-all-alts' class='ficsit-btn btn-secondary btn-sm'>Solo Estándar</button>")
   html.add("</div>")
   html.add("</div>")
 
   # Search box
   html.add("<div class='search-bar'>")
-  html.add(fmt"<input id='alt-search-input' type='text' placeholder='Search alternate recipes by name or product...' value='{escapeHtml(altSearchQuery)}' class='ficsit-input' />")
+  html.add(fmt"<input id='alt-search-input' type='text' placeholder='Buscar receta alternativa...' value='{escapeHtml(altSearchQuery)}' class='ficsit-input' />")
   html.add("</div>")
 
   # Grid of alternate recipe cards
@@ -364,10 +455,10 @@ proc renderAlternatesTab(): string =
     if q != "" and not r.name.toLowerAscii().contains(q) and not r.id.toLowerAscii().contains(q):
       continue
 
-    let isEnabled = enabledAlternates.contains(r.id)
+    let isEnabled = enabledAlts.contains(r.id)
     let checkedStr = if isEnabled: "checked" else: ""
-
     let cardClass = if isEnabled: "alt-card active" else: "alt-card"
+    
     html.add("<div class='" & cardClass & "'>")
     html.add("<div class='alt-card-header'>")
     html.add(fmt"<label class='checkbox-container'><input type='checkbox' class='alt-checkbox' data-recipe-id='{r.id}' {checkedStr} /><span class='checkmark'></span> <strong>{escapeHtml(r.name)}</strong></label>")
@@ -400,14 +491,16 @@ proc renderAlternatesTab(): string =
 proc renderDatabaseTab(): string =
   var html = "<div class='tab-content db-tab'>"
   html.add("<div class='db-header'>")
-  html.add("<h3>📖 Satisfactory 1.0 Item & Recipe Encyclopedia</h3>")
-  html.add("<p>Full dataset extracted from Satisfactory 1.0 community resources (including Phase 5 quantum items, converter recipes, and power shards).</p>")
-  html.add("<input id='db-search-input' type='text' placeholder='Search items and recipes...' value='" & escapeHtml(dbSearchQuery) & "' class='ficsit-input db-search' />")
+  html.add("<div>")
+  html.add("<h3>📖 Enciclopedia Satisfactory 1.0</h3>")
+  html.add("<span class='section-subtitle'>Consulta instantánea de recetas, máquinas y proporciones del juego completo</span>")
+  html.add("</div>")
+  html.add("<input id='db-search-input' type='text' placeholder='Buscar producto o categoría...' value='" & escapeHtml(dbSearchQuery) & "' class='ficsit-input db-search' />")
   html.add("</div>")
 
   html.add("<div class='table-responsive'>")
   html.add("<table class='ficsit-table'>")
-  html.add("<thead><tr><th>Item</th><th>Category</th><th>Craft Recipes</th><th>Producers</th></tr></thead>")
+  html.add("<thead><tr><th>Producto</th><th>Categoría</th><th>Recetas para fabricarlo</th><th>Máquinas</th></tr></thead>")
   html.add("<tbody>")
 
   var count = 0
@@ -423,7 +516,6 @@ proc renderDatabaseTab(): string =
     if count > maxDisplay:
       break
 
-    # Instant O(1) lookup
     let recs = getRecipesForItem(idStr)
     var recNames: seq[string] = @[]
     var prods: seq[string] = @[]
@@ -446,27 +538,9 @@ proc renderDatabaseTab(): string =
 
   html.add("</tbody></table></div>")
   if count > maxDisplay:
-    html.add(fmt"<div class='empty-placeholder' style='padding: 12px; margin-top: 10px; font-size: 13px;'>Showing first {maxDisplay} items. Use the search bar above to filter by item name or category.</div>")
+    html.add(fmt"<div class='empty-placeholder' style='padding: 10px; margin-top: 10px; font-size: 12px;'>Mostrando primeros {maxDisplay} elementos. Usa el buscador para filtrar.</div>")
   html.add("</div>")
   return html
-
-proc renderTabBar(): string =
-  var html = "<div class='ficsit-tabs'>"
-  proc addTabBtn(tabId, icon, label: string) =
-    let activeClass = if currentTab == tabId: "active" else: ""
-    html.add(fmt"<button class='tab-btn {activeClass}' data-tab='{tabId}'>{icon} {label}</button>")
-
-  addTabBtn("overview", "📊", "Factory Overview")
-  addTabBtn("steps", "🏭", "Production Steps")
-  addTabBtn("graph", "🌿", "Flowchart (DAG)")
-  addTabBtn("byproducts", "♻️", "Byproducts & Sinks")
-  addTabBtn("alternates", "🛠️", "Alternate Recipes (" & $enabledAlternates.len & ")")
-  addTabBtn("database", "📖", "1.0 Encyclopedia")
-  html.add("</div>")
-  return html
-
-proc updatePlan*() =
-  currentPlan = planProduction(currentTargets, enabledAlternates)
 
 proc initGraphInteractions() =
   {.emit: """
@@ -700,69 +774,152 @@ proc renderApp*() =
 
   var html = ""
   
-  # FICSIT Navigation Header
-  html.add("<header class='ficsit-header'>")
-  html.add("<div class='header-brand'>")
-  html.add("<div class='ficsit-stripe'></div>")
-  html.add("<div class='brand-text'>")
-  html.add("<h1 class='brand-title'>FICSIT PRODUCTION OPTIMIZER</h1>")
-  html.add("<span class='brand-subtitle'>SATISFACTORY 1.0 FACTORY PLANNER & LINEAR SOLVER</span>")
+  # Top Header (Clean, minimalist engineering aesthetic)
+  html.add("<header class='planner-header'>")
+  html.add("<div class='header-title-box'>")
+  html.add("<span class='app-icon'>⚡</span>")
+  html.add("<div class='app-titles'>")
+  html.add("<h1 class='app-title'>Satisfactory Factory Planner</h1>")
+  html.add("<span class='app-subtitle'>Planificación multindustrial independiente // Optimización lineal Simplex</span>")
   html.add("</div>")
-  html.add("</div>")
-
-  # Live top stats
-  html.add("<div class='header-stats'>")
-  let pwrText = if currentPlan.success: fmt"⚡ {currentPlan.totalPowerMW:.1f} MW" else: "⚡ -- MW"
-  let bldText = if currentPlan.success: fmt"🏭 {currentPlan.totalBuildings:.1f} Bldgs" else: "🏭 -- Bldgs"
-  html.add(fmt"<div class='stat-badge badge-pwr'>{pwrText}</div>")
-  html.add(fmt"<div class='stat-badge badge-bld'>{bldText}</div>")
   html.add("</div>")
   html.add("</header>")
 
-  # Main Content Wrapper
-  html.add("<main class='ficsit-main'>")
+  # Main Content
+  html.add("<main class='planner-main'>")
   
-  # Target Builder Section
-  html.add(renderTargetsBar())
+  # 1. Multi-factory switcher and toolbar
+  html.add(renderFactoryBar())
 
-  # Tab Bar Navigation
+  # 2. Factory configuration (Targets & Available Raw Resources)
+  html.add(renderFactoryConfig())
+
+  # 3. Main tab navigation
   html.add(renderTabBar())
 
-  # Active Tab Content
+  # 4. Tab contents
   case currentTab
-  of "overview": html.add(renderOverviewTab())
-  of "steps": html.add(renderStepsTab())
+  of "production": html.add(renderProductionTab())
   of "graph": html.add(renderGraphTab())
-  of "byproducts": html.add(renderByproductsTab())
   of "alternates": html.add(renderAlternatesTab())
   of "database": html.add(renderDatabaseTab())
-  else: html.add(renderOverviewTab())
+  else: html.add(renderProductionTab())
 
   html.add("</main>")
-
-  # Footer
-  html.add("<footer class='ficsit-footer'>")
-  html.add("<span>FICSIT Inc. Property • Compiling Nim ➔ JavaScript • Satisfactory 1.0 Linear Programming Simplex Engine</span>")
-  html.add("</footer>")
 
   app.innerHTML = cstring(html)
 
   if currentTab == "graph" and graphViewMode == "svg":
     initGraphInteractions()
 
-var eventsBound = false
-
 proc bindGlobalEvents*() =
   if eventsBound: return
   eventsBound = true
 
-  # 1. Global Click delegation
+  # 1. Global Click Delegation
   document.addEventListener(cstring("click"), proc(e: Event) =
     let target = e.target
     if target == nil: return
 
-    # A. Tab button click
-    let tabBtn = findClosest(target, cstring(".tab-btn"))
+    # Switch factory tab
+    let factTab = findClosest(target, cstring(".factory-tab"))
+    if factTab != nil and findClosest(target, cstring(".btn-tab-close")) == nil:
+      let fid = factTab.getAttribute(cstring("data-factory-id"))
+      if fid != nil and $fid != activeFactoryId:
+        activeFactoryId = $fid
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+
+    # Delete factory button (from tab or toolbar)
+    let closeTabBtn = findClosest(target, cstring(".btn-tab-close"))
+    let delFactBtn = findClosest(target, cstring("#btn-delete-factory"))
+    if (closeTabBtn != nil or delFactBtn != nil) and factories.len > 1:
+      let targetFid = if closeTabBtn != nil: $closeTabBtn.getAttribute(cstring("data-factory-id")) else: activeFactoryId
+      var delIdx = -1
+      for i in 0 ..< factories.len:
+        if factories[i].id == targetFid:
+          delIdx = i
+          break
+      if delIdx >= 0:
+        factories.delete(delIdx)
+        if activeFactoryId == targetFid:
+          activeFactoryId = factories[0].id
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+
+    # New factory button
+    let newFactBtn = findClosest(target, cstring("#btn-new-factory"))
+    if newFactBtn != nil:
+      let newId = generateFactoryId()
+      let newName = fmt"Fábrica {factories.len + 1}"
+      let newFactory = createDefaultFactory(newId, newName)
+      factories.add(newFactory)
+      activeFactoryId = newId
+      saveFactories()
+      updatePlan()
+      renderApp()
+      return
+
+    # Duplicate factory button
+    let dupBtn = findClosest(target, cstring("#btn-duplicate-factory"))
+    if dupBtn != nil:
+      let fPtr = getActiveFactory()
+      if fPtr != nil:
+        let newId = generateFactoryId()
+        var cloned = fPtr[]
+        cloned.id = newId
+        cloned.name = fPtr[].name & " (Copia)"
+        factories.add(cloned)
+        activeFactoryId = newId
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+
+    # Raw resource pill toggle
+    let rawPill = findClosest(target, cstring(".raw-pill"))
+    if rawPill != nil:
+      let rId = rawPill.getAttribute(cstring("data-raw-id"))
+      let fPtr = getActiveFactory()
+      if rId != nil and fPtr != nil:
+        let rStr = $rId
+        let foundIdx = fPtr[].allowedRaw.find(rStr)
+        if foundIdx >= 0:
+          fPtr[].allowedRaw.delete(foundIdx)
+        else:
+          fPtr[].allowedRaw.add(rStr)
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+
+    # Raw quick buttons: All / None
+    let rawAllBtn = findClosest(target, cstring("#btn-raw-all"))
+    if rawAllBtn != nil:
+      let fPtr = getActiveFactory()
+      if fPtr != nil:
+        fPtr[].allowedRaw = getAllRawResourceIds()
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+
+    let rawNoneBtn = findClosest(target, cstring("#btn-raw-none"))
+    if rawNoneBtn != nil:
+      let fPtr = getActiveFactory()
+      if fPtr != nil:
+        fPtr[].allowedRaw = @[]
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+
+    # Main Tab Buttons
+    let tabBtn = findClosest(target, cstring(".main-tabs .tab-btn"))
     if tabBtn != nil:
       let tabId = tabBtn.getAttribute(cstring("data-tab"))
       if tabId != nil and $tabId != "":
@@ -770,7 +927,7 @@ proc bindGlobalEvents*() =
         renderApp()
         return
 
-    # A2. Graph view mode switches
+    # Graph view mode switches
     let viewSvgBtn = findClosest(target, cstring("#btn-view-svg"))
     if viewSvgBtn != nil:
       graphViewMode = "svg"
@@ -783,122 +940,147 @@ proc bindGlobalEvents*() =
       renderApp()
       return
 
-    # B. Add Target button
+    # Add Target button
     let addBtn = findClosest(target, cstring("#btn-add-target"))
     if addBtn != nil:
       let sel = cast[SelectElement](document.getElementById(cstring("target-item-select")))
       let rateIn = cast[InputElement](document.getElementById(cstring("target-rate-input")))
-      if sel != nil and rateIn != nil:
+      let fPtr = getActiveFactory()
+      if sel != nil and rateIn != nil and fPtr != nil:
         let itemId = $sel.value
         let rateVal = parseFloat($rateIn.value)
         if rateVal > 0.0 and itemId != "":
           var found = false
-          for i in 0 ..< currentTargets.len:
-            if currentTargets[i].itemId == itemId:
-              currentTargets[i].rate = rateVal
+          for i in 0 ..< fPtr[].targets.len:
+            if fPtr[].targets[i].itemId == itemId:
+              fPtr[].targets[i].rate = rateVal
               found = true
               break
           if not found:
-            currentTargets.add(FactoryTarget(itemId: itemId, rate: rateVal))
+            fPtr[].targets.add(FactoryTarget(itemId: itemId, rate: rateVal))
+          saveFactories()
           updatePlan()
           renderApp()
           return
 
-    # C. Clear All targets
-    let clearBtn = findClosest(target, cstring("#btn-clear-targets"))
-    if clearBtn != nil:
-      currentTargets = @[]
-      updatePlan()
-      renderApp()
-      return
-
-    # D. Remove chip
+    # Remove target chip
     let removeBtn = findClosest(target, cstring(".chip-remove-btn"))
     if removeBtn != nil:
       let idxStr = removeBtn.getAttribute(cstring("data-idx"))
-      if idxStr != nil:
+      let fPtr = getActiveFactory()
+      if idxStr != nil and fPtr != nil:
         let idx = parseInt($idxStr)
-        if idx >= 0 and idx < currentTargets.len:
-          currentTargets.delete(idx)
+        if idx >= 0 and idx < fPtr[].targets.len:
+          fPtr[].targets.delete(idx)
+          saveFactories()
           updatePlan()
           renderApp()
           return
 
-    # E. Step chip rate (+5 / -5)
+    # Step chip rate (+5 / -5)
     let stepBtn = findClosest(target, cstring(".chip-step-btn"))
     if stepBtn != nil:
       let idxStr = stepBtn.getAttribute(cstring("data-idx"))
       let actStr = stepBtn.getAttribute(cstring("data-action"))
-      if idxStr != nil:
+      let fPtr = getActiveFactory()
+      if idxStr != nil and fPtr != nil:
         let idx = parseInt($idxStr)
-        if idx >= 0 and idx < currentTargets.len:
+        if idx >= 0 and idx < fPtr[].targets.len:
           if $actStr == "inc":
-            currentTargets[idx].rate += 5.0
+            fPtr[].targets[idx].rate += 5.0
           elif $actStr == "dec":
-            currentTargets[idx].rate = max(1.0, currentTargets[idx].rate - 5.0)
+            fPtr[].targets[idx].rate = max(1.0, fPtr[].targets[idx].rate - 5.0)
+          saveFactories()
           updatePlan()
           renderApp()
           return
 
-    # F. Enable all alternates
+    # Enable / Disable all alternates
     let enableAllBtn = findClosest(target, cstring("#btn-enable-all-alts"))
     if enableAllBtn != nil:
-      for idStr in alternateRecipeIds:
-        enabledAlternates.incl(idStr)
-      updatePlan()
-      renderApp()
-      return
-
-    # G. Disable all alternates
-    let disableAllBtn = findClosest(target, cstring("#btn-disable-all-alts"))
-    if disableAllBtn != nil:
-      enabledAlternates.clear()
-      updatePlan()
-      renderApp()
-      return
-  )
-
-  # 2. Global Change delegation
-  document.addEventListener(cstring("change"), proc(e: Event) =
-    let target = e.target
-    if target == nil: return
-
-    # A. Alternate recipe checkbox
-    let altBox = findClosest(target, cstring(".alt-checkbox"))
-    if altBox != nil:
-      let box = cast[InputElement](altBox)
-      let rId = box.getAttribute(cstring("data-recipe-id"))
-      if rId != nil:
-        if box.checked:
-          enabledAlternates.incl($rId)
-        else:
-          enabledAlternates.excl($rId)
+      let fPtr = getActiveFactory()
+      if fPtr != nil:
+        fPtr[].enabledAlts = @[]
+        for idStr in alternateRecipeIds:
+          fPtr[].enabledAlts.add(idStr)
+        saveFactories()
         updatePlan()
         renderApp()
         return
 
-    # B. Preset selector
+    let disableAllBtn = findClosest(target, cstring("#btn-disable-all-alts"))
+    if disableAllBtn != nil:
+      let fPtr = getActiveFactory()
+      if fPtr != nil:
+        fPtr[].enabledAlts = @[]
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+  )
+
+  # 2. Global Change Delegation
+  document.addEventListener(cstring("change"), proc(e: Event) =
+    let target = e.target
+    if target == nil: return
+
+    # Alternate recipe checkbox toggle
+    let altBox = findClosest(target, cstring(".alt-checkbox"))
+    if altBox != nil:
+      let box = cast[InputElement](altBox)
+      let rId = box.getAttribute(cstring("data-recipe-id"))
+      let fPtr = getActiveFactory()
+      if rId != nil and fPtr != nil:
+        let rStr = $rId
+        let foundIdx = fPtr[].enabledAlts.find(rStr)
+        if box.checked:
+          if foundIdx < 0: fPtr[].enabledAlts.add(rStr)
+        else:
+          if foundIdx >= 0: fPtr[].enabledAlts.delete(foundIdx)
+        saveFactories()
+        updatePlan()
+        renderApp()
+        return
+
+    # Preset selector
     let presetSel = findClosest(target, cstring("#preset-select"))
     if presetSel != nil:
       let sel = cast[SelectElement](presetSel)
       let pid = $sel.value
-      if pid != "":
+      let fPtr = getActiveFactory()
+      if pid != "" and fPtr != nil:
         for p in getPresets():
           if p.id == pid:
-            currentTargets = p.targets
+            fPtr[].targets = p.targets
             if p.enableAlternates:
               for a in p.enabledAlts:
-                enabledAlternates.incl(a)
+                if not fPtr[].enabledAlts.contains(a):
+                  fPtr[].enabledAlts.add(a)
+            saveFactories()
             updatePlan()
             renderApp()
             return
   )
 
-  # 3. Global Input delegation
+  # 3. Global Input Delegation
   document.addEventListener(cstring("input"), proc(e: Event) =
     let target = e.target
     if target == nil: return
 
+    # Factory name live edit
+    let nameInput = findClosest(target, cstring("#factory-name-input"))
+    if nameInput != nil:
+      let fPtr = getActiveFactory()
+      if fPtr != nil:
+        fPtr[].name = $cast[InputElement](nameInput).value
+        saveFactories()
+        # Update tab label without full app re-render
+        let tabEl = document.querySelector(cstring(".factory-tab.active .factory-tab-name"))
+        if tabEl != nil:
+          tabEl.textContent = cstring(fPtr[].name)
+      return
+
+    # Alternate recipes search query
     let altSearch = findClosest(target, cstring("#alt-search-input"))
     if altSearch != nil:
       altSearchQuery = $cast[InputElement](altSearch).value
@@ -910,6 +1092,7 @@ proc bindGlobalEvents*() =
         inp.setSelectionRange(altSearchQuery.len, altSearchQuery.len)
       return
 
+    # Database search query
     let dbSearch = findClosest(target, cstring("#db-search-input"))
     if dbSearch != nil:
       dbSearchQuery = $cast[InputElement](dbSearch).value
@@ -923,8 +1106,13 @@ proc bindGlobalEvents*() =
   )
 
 proc initUI*() =
-  let p = getPresets()[0]
-  currentTargets = p.targets
+  let loaded = loadFactories()
+  if not loaded or factories.len == 0:
+    let defFact = createDefaultFactory("factory-1", "Base Principal")
+    factories = @[defFact]
+    activeFactoryId = defFact.id
+    saveFactories()
+
   bindGlobalEvents()
   updatePlan()
   renderApp()

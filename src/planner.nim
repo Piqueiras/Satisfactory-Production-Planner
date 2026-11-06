@@ -70,7 +70,10 @@ proc isBackEdge(u, v: string, edges: seq[FlowEdge]): bool =
   var visited = initHashSet[string]()
   return hasReach(v, u, edges, visited)
 
-proc planProduction*(targets: seq[FactoryTarget], enabledAlts: HashSet[string]): FactoryPlan =
+proc planProduction*(targets: seq[FactoryTarget],
+                    allowedRaw: HashSet[string],
+                    enabledAlts: HashSet[string],
+                    disabledRecipes: HashSet[string] = initHashSet[string]()): FactoryPlan =
   var plan = FactoryPlan()
   plan.targets = targets
 
@@ -101,6 +104,9 @@ proc planProduction*(targets: seq[FactoryTarget], enabledAlts: HashSet[string]):
     let currItem = queue.pop()
     for _, rec in allRecipes:
       if rec.outputs.hasKey(currItem):
+        # Check if explicitly disabled
+        if disabledRecipes.contains(rec.id):
+          continue
         # Check alternate recipe permission
         if rec.isAlternate and not enabledAlts.contains(rec.id):
           continue
@@ -129,11 +135,11 @@ proc planProduction*(targets: seq[FactoryTarget], enabledAlts: HashSet[string]):
     itemIndex[it] = itemList.len
     itemList.add(it)
 
-  # Determine raw resources among relevant items
+  # Determine raw resources among relevant items that are permitted at this location
   var rawResourcesInPlan: seq[string] = @[]
   for it in itemList:
-    if rawResourceIds.contains(it):
-      # Items that can be supplied by the map
+    if rawResourceIds.contains(it) and allowedRaw.contains(it):
+      # Items that can be supplied by the map at this site
       rawResourcesInPlan.add(it)
 
   let nCraft = craftRecipes.len
@@ -143,7 +149,14 @@ proc planProduction*(targets: seq[FactoryTarget], enabledAlts: HashSet[string]):
 
   if nCraft == 0 and nRaw == 0:
     plan.success = false
-    plan.errorMessage = "No valid recipes found to produce the selected items."
+    var missingRaws: seq[string] = @[]
+    for it in relevantItems:
+      if rawResourceIds.contains(it) and not allowedRaw.contains(it):
+        missingRaws.add(getItemName(it))
+    if missingRaws.len > 0:
+      plan.errorMessage = "No es posible calcular la producción: faltan recursos crudos deshabilitados en esta fábrica: " & missingRaws.join(", ")
+    else:
+      plan.errorMessage = "No se encontraron recetas válidas para producir los productos seleccionados."
     return plan
 
   # 2. Build Simplex matrices
@@ -183,7 +196,14 @@ proc planProduction*(targets: seq[FactoryTarget], enabledAlts: HashSet[string]):
 
   if not sol.success:
     plan.success = false
-    plan.errorMessage = sol.errorMessage
+    var missingRaws: seq[string] = @[]
+    for it in relevantItems:
+      if rawResourceIds.contains(it) and not allowedRaw.contains(it):
+        missingRaws.add(getItemName(it))
+    if missingRaws.len > 0:
+      plan.errorMessage = "No es posible calcular la producción: los siguientes recursos crudos están deshabilitados en esta fábrica: " & missingRaws.join(", ") & ". Habilítalos en los recursos disponibles de la fábrica o activa recetas alternativas."
+    else:
+      plan.errorMessage = "No es posible satisfacer la demanda con las recetas y recursos permitidos en esta fábrica."
     return plan
 
   plan.success = true
@@ -411,4 +431,7 @@ proc planProduction*(targets: seq[FactoryTarget], enabledAlts: HashSet[string]):
   )
 
   return plan
+
+proc planProduction*(targets: seq[FactoryTarget], enabledAlts: HashSet[string]): FactoryPlan =
+  return planProduction(targets, rawResourceIds, enabledAlts, initHashSet[string]())
 

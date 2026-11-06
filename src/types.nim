@@ -93,3 +93,11 @@ type
     enableAlternates*: bool
     enabledAlts*: seq[string]
 
+  Factory* = object
+    id*: string
+    name*: string
+    targets*: seq[FactoryTarget]
+    allowedRaw*: seq[string]
+    enabledAlts*: seq[string]
+    disabledRecipes*: seq[string]
+

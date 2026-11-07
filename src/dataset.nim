@@ -1,7 +1,9 @@
-import std/[json, tables, sets, strutils, algorithm]
+import std/[json, tables, sets, algorithm]
 import types
 
-const rawDataStr = staticRead("../data/raw_data.json")
+const
+  rawDataStr = staticRead("../data/raw_data.json")
+  mapNodesStr = staticRead("../data/map_nodes.json")
 
 var
   allItems*: Table[string, Item]
@@ -11,6 +13,9 @@ var
   rawResourceIds*: HashSet[string]
   craftableItemIds*: seq[string]
   itemRecipesMap*: Table[string, seq[Recipe]]
+  allMapNodes*: seq[ResourceNode]
+  nodesByResource*: Table[string, seq[ResourceNode]]
+  nodesByBiome*: Table[string, seq[ResourceNode]]
 
 proc initMachines() =
   allMachines = initTable[string, MachineInfo]()
@@ -137,6 +142,35 @@ proc loadDatabase*() =
 
   craftableItemIds.sort(proc(a, b: string): int = cmp(allItems[a].name, allItems[b].name))
 
+  # 5. Load Satisfactory 1.0 Resource Nodes Dataset
+  allMapNodes = @[]
+  nodesByResource = initTable[string, seq[ResourceNode]]()
+  nodesByBiome = initTable[string, seq[ResourceNode]]()
+
+  let mapData = parseJson(mapNodesStr)
+  if mapData.hasKey("nodes"):
+    for nNode in mapData["nodes"]:
+      let n = ResourceNode(
+        id: nNode["id"].getStr(),
+        resourceId: nNode["resourceId"].getStr(),
+        kind: if nNode.hasKey("kind"): nNode["kind"].getStr() else: "node",
+        purity: if nNode.hasKey("purity"): nNode["purity"].getStr() else: "normal",
+        x: nNode["x"].getFloat(),
+        y: nNode["y"].getFloat(),
+        z: if nNode.hasKey("z"): nNode["z"].getFloat() else: 0.0,
+        mapX: if nNode.hasKey("mapX"): nNode["mapX"].getFloat() else: 0.0,
+        mapY: if nNode.hasKey("mapY"): nNode["mapY"].getFloat() else: 0.0,
+        biome: if nNode.hasKey("biome"): nNode["biome"].getStr() else: "Unknown"
+      )
+      allMapNodes.add(n)
+      var resList = nodesByResource.getOrDefault(n.resourceId, @[])
+      resList.add(n)
+      nodesByResource[n.resourceId] = resList
+
+      var biomeList = nodesByBiome.getOrDefault(n.biome, @[])
+      biomeList.add(n)
+      nodesByBiome[n.biome] = biomeList
+
 # Initialize on module load
 loadDatabase()
 
@@ -162,3 +196,9 @@ proc getMachinePower*(idStr: string): float =
 
 proc getRecipesForItem*(itemId: string): seq[Recipe] =
   return itemRecipesMap.getOrDefault(itemId, @[])
+
+proc getNodesForResource*(resourceId: string): seq[ResourceNode] =
+  return nodesByResource.getOrDefault(resourceId, @[])
+
+proc getNodesInBiome*(biomeName: string): seq[ResourceNode] =
+  return nodesByBiome.getOrDefault(biomeName, @[])

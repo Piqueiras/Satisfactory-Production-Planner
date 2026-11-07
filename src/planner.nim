@@ -1,5 +1,6 @@
 import std/[tables, sets, sequtils, algorithm, math, strutils, strformat]
-import types, dataset, simplex
+import types, dataset, simplex, locator, svg_map
+export locator, svg_map
 
 # Raw resource cost weights for LP objective function
 proc getRawResourceWeight(idStr: string): float =
@@ -429,6 +430,32 @@ proc planProduction*(targets: seq[FactoryTarget],
     if a.tier != b.tier: cmp(a.tier, b.tier)
     else: cmp(a.title, b.title)
   )
+
+  # 6. Modular Sub-Factory Partitioning and Spatial Optimization
+  plan.subFactories = partitionIntoSubFactories(plan, 1)
+
+  # First pass: calculate optimal locations for primary / intermediate sub-factories
+  for i in 0 ..< plan.subFactories.len:
+    if plan.subFactories[i].requiredRaw.len > 0:
+      plan.subFactories[i].recommendations = findOptimalLocations(plan.subFactories[i], allMapNodes, 1)
+      if plan.subFactories[i].recommendations.len > 0:
+        plan.subFactories[i].assignedBiome = plan.subFactories[i].recommendations[0].biome
+        plan.subFactories[i].centerX = plan.subFactories[i].recommendations[0].centerX
+        plan.subFactories[i].centerY = plan.subFactories[i].recommendations[0].centerY
+
+  # Second pass: calculate optimal locations for assembly modules (co-locating with primary suppliers)
+  for i in 0 ..< plan.subFactories.len:
+    if plan.subFactories[i].requiredRaw.len == 0:
+      plan.subFactories[i].recommendations = findOptimalLocations(plan.subFactories[i], allMapNodes, 1, 1.0, plan.subFactories)
+      if plan.subFactories[i].recommendations.len > 0:
+        plan.subFactories[i].assignedBiome = plan.subFactories[i].recommendations[0].biome
+        plan.subFactories[i].centerX = plan.subFactories[i].recommendations[0].centerX
+        plan.subFactories[i].centerY = plan.subFactories[i].recommendations[0].centerY
+
+  # Collect top recommendations into plan.recommendations
+  for sub in plan.subFactories:
+    if sub.recommendations.len > 0:
+      plan.recommendations.add(sub.recommendations[0])
 
   return plan
 

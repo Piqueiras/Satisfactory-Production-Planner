@@ -84,6 +84,8 @@ type
     byproducts*: seq[SurplusInfo]
     nodes*: seq[FlowNode]
     edges*: seq[FlowEdge]
+    subFactories*: seq[SubFactoryModule]
+    recommendations*: seq[LocationRecommendation]
 
   Preset* = object
     id*: string
@@ -100,4 +102,44 @@ type
     allowedRaw*: seq[string]
     enabledAlts*: seq[string]
     disabledRecipes*: seq[string]
+
+  NodePurity* = enum
+    npImpure = "impure"
+    npNormal = "normal"
+    npPure = "pure"
+
+  ResourceNode* = object
+    id*: string
+    resourceId*: string
+    kind*: string           # "node", "well", "geyser"
+    purity*: string         # "impure", "normal", "pure"
+    x*: float               # Unreal Engine X (cm)
+    y*: float               # Unreal Engine Y (cm)
+    z*: float               # Unreal Engine Z (cm)
+    mapX*: float            # Map pixel X (0..8192)
+    mapY*: float            # Map pixel Y (0..8192)
+    biome*: string          # Biome name
+
+  SubFactoryModule* = object
+    id*: string
+    name*: string
+    producedItems*: seq[FactoryTarget]
+    requiredRaw*: Table[string, float]
+    steps*: seq[ProductionStep]
+    assignedBiome*: string
+    centerX*: float
+    centerY*: float
+    recommendations*: seq[LocationRecommendation]
+
+  LocationRecommendation* = object
+    id*: string
+    title*: string
+    biome*: string
+    centerX*: float
+    centerY*: float
+    score*: float
+    matchedNodes*: seq[ResourceNode]
+    subModules*: seq[SubFactoryModule]
+    logisticsDistanceMeters*: float
+    explanation*: string
 

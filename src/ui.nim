@@ -1,5 +1,5 @@
 import std/[dom, strutils, strformat, tables, sets, sequtils, algorithm, math, json]
-import types, dataset, planner, presets, svg_graph
+import types, dataset, planner, presets, svg_graph, svg_map
 
 type
   SelectElement* {.importc.} = ref object of Element
@@ -46,8 +46,9 @@ var
   factories: seq[Factory] = @[]
   activeFactoryId: string = ""
   currentPlan: FactoryPlan
-  currentTab: string = "production" # "production", "graph", "alternates", "database"
-  graphViewMode: string = "svg"     # "svg" or "board"
+  currentTab: string = "production" # "production", "graph", "map", "alternates", "database"
+  graphViewMode: string = "svg"     # "svg", "board", "map"
+  selectedLocationOption: Table[string, int] = initTable[string, int]()
   altSearchQuery: string = ""
   dbSearchQuery: string = ""
   eventsBound = false
@@ -269,6 +270,7 @@ proc renderTabBar(): string =
 
   addTabBtn("production", "📋", "Plan de Producción")
   addTabBtn("graph", "📈", "Diagrama de Flujo")
+  addTabBtn("map", "🗺️", "Radar y Localización")
   addTabBtn("alternates", "🛠️", "Recetas Alternativas (" & $altCount & ")")
   addTabBtn("database", "📖", "Enciclopedia 1.0")
   html.add("</div>")
@@ -385,6 +387,8 @@ proc renderProductionTab(): string =
   html.add("</div>") # tab-content
   return html
 
+proc renderMapTab*(): string
+
 proc renderGraphTab(): string =
   var html = "<div class='tab-content graph-tab'>"
 
@@ -393,8 +397,10 @@ proc renderGraphTab(): string =
   html.add("<div class='graph-view-switches'>")
   let svgActive = if graphViewMode == "svg": "active btn-primary" else: "btn-secondary"
   let boardActive = if graphViewMode == "board": "active btn-primary" else: "btn-secondary"
+  let mapActive = if graphViewMode == "map": "active btn-primary" else: "btn-secondary"
   html.add(fmt"<button id='btn-view-svg' class='ficsit-btn btn-sm {svgActive}'>🌿 Diagrama DAG</button>")
   html.add(fmt"<button id='btn-view-board' class='ficsit-btn btn-sm {boardActive}'>📋 Columnas por Etapas</button>")
+  html.add(fmt"<button id='btn-view-map' class='ficsit-btn btn-sm {mapActive}'>🗺️ Radar Espacial</button>")
   html.add("</div>")
 
   if graphViewMode == "svg":
@@ -414,8 +420,167 @@ proc renderGraphTab(): string =
     html.add("<div class='svg-viewport' id='svg-container'>")
     html.add(renderSvgGraph(currentPlan))
     html.add("</div>")
+  elif graphViewMode == "map":
+    html.add(renderMapTab())
   else:
     html.add(renderStageBreakdown(currentPlan))
+
+  html.add("</div>") # tab-content
+  return html
+
+proc renderMapTab*(): string =
+  var html = "<div class='tab-content map-tab'>"
+
+  if not currentPlan.success or currentPlan.subFactories.len == 0:
+    html.add("<div class='ficsit-alert alert-warning'>")
+    html.add("<span>🗺️ <strong>No hay sub-fábricas para localizar:</strong> Añade al menos un producto objetivo en el panel superior para que el motor de IA particione el diagrama y encuentre los clústeres óptimos de recursos en el mapa.</span>")
+    html.add("</div>")
+    html.add("</div>")
+    return html
+
+  # Summary Telemetry Header
+  html.add("<div class='map-header-strip'>")
+  html.add("<div class='map-header-titles'>")
+  html.add("<h3>🗺️ Radar de Localización Espacial (FICSIT Inc. Satellite Link)</h3>")
+  html.add("<span class='section-subtitle'>Particionado modular automático y clústeres óptimos de recursos sobre el mapa de Satisfactory 1.0. Selecciona la opción más conveniente para cada módulo.</span>")
+  html.add("</div>")
+
+  # Stats
+  var totalNodesUsed = 0
+  var totalTransportMeters = 0.0
+  for sub in currentPlan.subFactories:
+    let rec = getEffectiveRec(sub, selectedLocationOption)
+    totalNodesUsed += rec.matchedNodes.len
+    totalTransportMeters += rec.logisticsDistanceMeters
+
+  let avgDist = if currentPlan.subFactories.len > 0: totalTransportMeters / float(currentPlan.subFactories.len) else: 0.0
+
+  html.add("<div class='map-header-metrics'>")
+  html.add(fmt"<span class='metric-badge'>🏭 <strong>{currentPlan.subFactories.len}</strong> Sub-fábricas</span>")
+  html.add(fmt"<span class='metric-badge'>⛏️ <strong>{totalNodesUsed}</strong> Nodos Asignados</span>")
+  html.add(fmt"<span class='metric-badge'>📏 <strong>{avgDist:.0f} m</strong> Dist. Media Logística</span>")
+  html.add("</div>")
+  html.add("</div>") # map-header-strip
+
+  # Main Split Layout
+  html.add("<div class='map-view-layout'>")
+
+  # Left Column: SubFactory Cards
+  html.add("<div class='map-sidebar'>")
+  html.add("<div class='sidebar-title'><strong>Módulos Detectados y Opciones</strong></div>")
+
+  for subIdx, sub in currentPlan.subFactories:
+    let isAssembly = sub.requiredRaw.len == 0
+    let typeClass = if isAssembly: "assembly-mod" else: "primary-mod"
+    let typeLabel = if isAssembly: "Módulo de Ensamblaje Final" else: "Sub-fábrica Primaria (Extracción)"
+    let typeColor = if isAssembly: "#a29bfe" else: "#FA9549"
+
+    let activeOptIdx = min(sub.recommendations.len - 1, max(0, selectedLocationOption.getOrDefault(sub.id, 0)))
+    let activeRec = getEffectiveRec(sub, selectedLocationOption)
+
+    html.add(fmt"<div class='subfactory-card {typeClass}'>")
+    
+    # Card Header
+    html.add("<div class='sf-card-header'>")
+    html.add(fmt"<span class='sf-title' style='color: {typeColor};'>🏭 #{subIdx + 1} {escapeHtml(sub.name)}</span>")
+    html.add(fmt"<span class='sf-pill'>{typeLabel}</span>")
+    html.add("</div>")
+
+    # Produced Outputs
+    if sub.producedItems.len > 0:
+      var prodParts: seq[string] = @[]
+      for p in sub.producedItems:
+        prodParts.add(fmt"<strong>{p.rate:.1f}/m</strong> {getItemName(p.itemId)}")
+      let prodJoined = prodParts.join(", ")
+      html.add("<div class='sf-throughput-row'>")
+      html.add(fmt"<span>📦 <strong>Produce:</strong> {prodJoined}</span>")
+      html.add("</div>")
+
+    # Raw Inputs (if primary)
+    if sub.requiredRaw.len > 0:
+      var rawParts: seq[string] = @[]
+      for rId, rRate in sub.requiredRaw:
+        rawParts.add(fmt"<strong>{rRate:.1f}/m</strong> {getItemName(rId)}")
+      let rawJoined = rawParts.join(", ")
+      html.add("<div class='sf-throughput-row sf-raw-row'>")
+      html.add(fmt"<span>⛏️ <strong>Demanda Vírgen:</strong> {rawJoined}</span>")
+      html.add("</div>")
+
+    # Option Selection Buttons (Opción 1, Opción 2, Opción 3)
+    if sub.recommendations.len > 0:
+      html.add("<div class='sf-opt-selector'>")
+      html.add("<span class='opt-selector-label'>Seleccionar Ubicación:</span>")
+      html.add("<div class='opt-btn-group'>")
+      for optIdx, rec in sub.recommendations:
+        let isSelected = optIdx == activeOptIdx
+        let activeClass = if isSelected: "active" else: ""
+        let optName = if optIdx == 0: fmt"#{optIdx+1} {rec.biome} (Óptima)" else: fmt"#{optIdx+1} {rec.biome}"
+        html.add(fmt"<button class='opt-btn {activeClass} btn-select-location-opt' data-module-id='{sub.id}' data-opt-idx='{optIdx}'>{optName}</button>")
+      html.add("</div>")
+      html.add("</div>")
+
+      # Selected Location Details
+      html.add("<div class='sf-loc-details'>")
+      html.add("<div class='loc-meta-grid'>")
+      html.add(fmt"<div>📍 <strong>Bioma:</strong> {activeRec.biome}</div>")
+      html.add(fmt"<div>🎯 <strong>Score:</strong> <span class='badge-score'>{activeRec.score:.1f}/100</span></div>")
+      html.add(fmt"<div>📏 <strong>Dist. Media:</strong> {activeRec.logisticsDistanceMeters:.1f} m</div>")
+      html.add(fmt"<div>🌐 <strong>UE:</strong> ({activeRec.centerX/100.0:.0f}m, {activeRec.centerY/100.0:.0f}m)</div>")
+      html.add("</div>")
+
+      if activeRec.matchedNodes.len > 0:
+        html.add("<div class='matched-nodes-list'>")
+        html.add("<span class='nodes-label'>Nodos asignados:</span>")
+        html.add("<div class='node-chips'>")
+        for n in activeRec.matchedNodes:
+          let nColor = getMineralColor(n.resourceId)
+          html.add(fmt"<span class='node-chip' style='border-left: 3px solid {nColor};'>{getItemName(n.resourceId)} ({n.purity.capitalizeAscii()})</span>")
+        html.add("</div>")
+        html.add("</div>")
+
+      html.add(fmt"<div class='loc-explanation'>💡 {escapeHtml(activeRec.explanation)}</div>")
+      html.add("</div>") # sf-loc-details
+
+    html.add("</div>") # subfactory-card
+
+  html.add("</div>") # map-sidebar
+
+  # Right Column: Map Stage & Legend
+  html.add("<div class='map-stage'>")
+  html.add("<div class='map-stage-toolbar'>")
+  html.add("<span class='map-stage-title'>🛰️ VISTA TÁCTICA DEL MUNDO MASSAGE-2(A-B)</span>")
+  html.add("<div class='map-stage-hint'>💡 Rueda del ratón para zoom, clic y arrastra para desplazar el radar.</div>")
+  html.add("</div>")
+
+  # Viewport containing the SVG
+  html.add("<div class='ficsit-map-viewport' id='map-viewport'>")
+  html.add(renderSvgMap(currentPlan, allMapNodes, selectedLocationOption))
+  html.add("<div id='map-tactical-tooltip' class='map-tactical-tooltip' style='display: none;'></div>")
+  html.add("</div>")
+
+  # Tactical Legend & Transport Guide
+  html.add("<div class='map-tactical-legend'>")
+  html.add("<div class='legend-section'>")
+  html.add("<span class='legend-header'>MINERALES:</span>")
+  html.add("<div class='mineral-chips'>")
+  for rId in ["iron-ore", "copper-ore", "limestone", "coal", "raw-quartz", "crude-oil", "caterium-ore", "bauxite", "sulfur", "uranium", "nitrogen-gas"]:
+    let c = getMineralColor(rId)
+    html.add(fmt"<span class='mineral-chip'><span class='dot' style='background-color: {c};'></span>{getItemName(rId)}</span>")
+  html.add("</div>")
+  html.add("</div>")
+
+  html.add("<div class='legend-section transport-guide'>")
+  html.add("<span class='legend-header'>TRANSPORTE LOGÍSTICO RECOMENDADO:</span>")
+  html.add("<div class='transport-pills'>")
+  html.add("<span class='trans-pill trans-belt'>📦 Cinta Transportadora (&lt; 400m)</span>")
+  html.add("<span class='trans-pill trans-truck'>🚜 Camión / Tractor FICSIT (400m - 1.5km)</span>")
+  html.add("<span class='trans-pill trans-train'>🚂 Tren FICSIT / 🛸 Dron (&gt; 1.5km)</span>")
+  html.add("</div>")
+  html.add("</div>")
+  html.add("</div>") # map-tactical-legend
+
+  html.add("</div>") # map-stage
+  html.add("</div>") # map-view-layout
 
   html.add("</div>") # tab-content
   return html
@@ -768,6 +933,299 @@ proc initGraphInteractions() =
   }
   """.}
 
+proc initMapInteractions*() =
+  {.emit: """
+  var svg = document.getElementById("ficsit-world-map-svg");
+  if (!svg) return;
+  var layer = document.getElementById("map-pan-zoom-layer");
+  if (!layer) return;
+  var tooltip = document.getElementById("map-tactical-tooltip");
+  var viewport = document.getElementById("map-viewport");
+
+  // Keep map state per session or initialize if fresh
+  if (typeof window.__map_scale === 'undefined') {
+    window.__map_scale = 1.0;
+    window.__map_tx = 0.0;
+    window.__map_ty = 0.0;
+    window.__map_sat_visible = true;
+  }
+
+  function applyTransform() {
+    layer.setAttribute("transform", "translate(" + window.__map_tx.toFixed(1) + ", " + window.__map_ty.toFixed(1) + ") scale(" + window.__map_scale.toFixed(3) + ")");
+    var resetBtn = document.getElementById("ctrl-btn-reset");
+    if (resetBtn) {
+      var t = resetBtn.querySelector("text");
+      if (t) t.textContent = Math.round(window.__map_scale * 100) + "%";
+    }
+  }
+
+  applyTransform();
+
+  // 1. Mouse Wheel Zoom centered on cursor
+  svg.onwheel = function(e) {
+    e.preventDefault();
+    var rect = svg.getBoundingClientRect();
+    var mouseX = e.clientX - rect.left;
+    var mouseY = e.clientY - rect.top;
+
+    var zoomFactor = e.deltaY < 0 ? 1.15 : 0.85;
+    var newScale = Math.max(0.5, Math.min(10.0, window.__map_scale * zoomFactor));
+
+    window.__map_tx = mouseX - (mouseX - window.__map_tx) * (newScale / window.__map_scale);
+    window.__map_ty = mouseY - (mouseY - window.__map_ty) * (newScale / window.__map_scale);
+    window.__map_scale = newScale;
+    applyTransform();
+  };
+
+  // 2. Pan / Drag
+  if (!window.__map_window_events_bound) {
+    window.__map_window_events_bound = true;
+    window.addEventListener("mousemove", function(e) {
+      if (window.__map_is_dragging) {
+        window.__map_tx = e.clientX - window.__map_drag_start_x;
+        window.__map_ty = e.clientY - window.__map_drag_start_y;
+        var lyr = document.getElementById("map-pan-zoom-layer");
+        if (lyr) {
+          lyr.setAttribute("transform", "translate(" + window.__map_tx.toFixed(1) + ", " + window.__map_ty.toFixed(1) + ") scale(" + window.__map_scale.toFixed(3) + ")");
+        }
+      }
+    });
+    window.addEventListener("mouseup", function() {
+      if (window.__map_is_dragging) {
+        window.__map_is_dragging = false;
+        var s = document.getElementById("ficsit-world-map-svg");
+        if (s) s.style.cursor = "grab";
+      }
+    });
+  }
+
+  svg.addEventListener("mousedown", function(e) {
+    if (e.target.closest && e.target.closest("#map-controls-hud")) return;
+    window.__map_is_dragging = true;
+    window.__map_drag_start_x = e.clientX - window.__map_tx;
+    window.__map_drag_start_y = e.clientY - window.__map_ty;
+    svg.style.cursor = "grabbing";
+  });
+
+  // 3. HUD Controls
+  var btnIn = document.getElementById("ctrl-btn-in");
+  if (btnIn) {
+    btnIn.onclick = function(e) {
+      e.stopPropagation();
+      var newScale = Math.min(10.0, window.__map_scale * 1.3);
+      window.__map_tx = 500 - (500 - window.__map_tx) * (newScale / window.__map_scale);
+      window.__map_ty = 500 - (500 - window.__map_ty) * (newScale / window.__map_scale);
+      window.__map_scale = newScale;
+      applyTransform();
+    };
+  }
+
+  var btnOut = document.getElementById("ctrl-btn-out");
+  if (btnOut) {
+    btnOut.onclick = function(e) {
+      e.stopPropagation();
+      var newScale = Math.max(0.5, window.__map_scale / 1.3);
+      window.__map_tx = 500 - (500 - window.__map_tx) * (newScale / window.__map_scale);
+      window.__map_ty = 500 - (500 - window.__map_ty) * (newScale / window.__map_scale);
+      window.__map_scale = newScale;
+      applyTransform();
+    };
+  }
+
+  var btnReset = document.getElementById("ctrl-btn-reset");
+  if (btnReset) {
+    btnReset.onclick = function(e) {
+      e.stopPropagation();
+      window.__map_scale = 1.0;
+      window.__map_tx = 0.0;
+      window.__map_ty = 0.0;
+      applyTransform();
+    };
+  }
+
+  var btnNodes = document.getElementById("ctrl-btn-nodes");
+  if (btnNodes) {
+    btnNodes.onclick = function(e) {
+      e.stopPropagation();
+      var gNodes = document.getElementById("inactive-map-nodes");
+      if (gNodes) {
+        var curr = gNodes.getAttribute("display");
+        gNodes.setAttribute("display", curr === "none" ? "inline" : "none");
+      }
+    };
+  }
+
+  var btnFit = document.getElementById("ctrl-btn-fit");
+  if (btnFit) {
+    btnFit.onclick = function(e) {
+      e.stopPropagation();
+      var beacons = svg.querySelectorAll(".subfactory-beacon-target");
+      if (beacons.length === 0) {
+        window.__map_scale = 1.0;
+        window.__map_tx = 0.0;
+        window.__map_ty = 0.0;
+        applyTransform();
+        return;
+      }
+      var minX = 9999, maxX = -9999, minY = 9999, maxY = -9999;
+      for (var i = 0; i < beacons.length; i++) {
+        var bx = parseFloat(beacons[i].getAttribute("data-cx") || "500");
+        var by = parseFloat(beacons[i].getAttribute("data-cy") || "500");
+        if (bx < minX) minX = bx;
+        if (bx > maxX) maxX = bx;
+        if (by < minY) minY = by;
+        if (by > maxY) maxY = by;
+      }
+      var pad = 120;
+      var spanX = Math.max(100, (maxX - minX) + pad * 2);
+      var spanY = Math.max(100, (maxY - minY) + pad * 2);
+      var midX = (minX + maxX) / 2.0;
+      var midY = (minY + maxY) / 2.0;
+      var fitScale = Math.max(0.8, Math.min(3.5, 900 / Math.max(spanX, spanY)));
+      window.__map_scale = fitScale;
+      window.__map_tx = 500 - midX * fitScale;
+      window.__map_ty = 500 - midY * fitScale;
+      applyTransform();
+    };
+  }
+
+  var btnSat = document.getElementById("ctrl-btn-satellite");
+  if (btnSat) {
+    btnSat.onclick = function(e) {
+      e.stopPropagation();
+      var img = document.getElementById("map-satellite-img");
+      if (img) {
+        window.__map_sat_visible = !window.__map_sat_visible;
+        img.style.display = window.__map_sat_visible ? "block" : "none";
+      }
+    };
+  }
+
+  // 4. Interactive Tactical Tooltips on Hover
+  function showTooltip(html, clientX, clientY) {
+    if (!tooltip || !viewport) return;
+    tooltip.innerHTML = html;
+    tooltip.style.display = "block";
+    var vpRect = viewport.getBoundingClientRect();
+    var x = clientX - vpRect.left + 16;
+    var y = clientY - vpRect.top + 16;
+
+    if (x + 260 > vpRect.width) x = Math.max(10, clientX - vpRect.left - 260);
+    if (y + 140 > vpRect.height) y = Math.max(10, clientY - vpRect.top - 140);
+
+    tooltip.style.left = x.toFixed(0) + "px";
+    tooltip.style.top = y.toFixed(0) + "px";
+  }
+
+  function hideTooltip() {
+    if (tooltip) tooltip.style.display = "none";
+  }
+
+  viewport.onmousemove = function(e) {
+    if (tooltip && tooltip.style.display === "block") {
+      var vpRect = viewport.getBoundingClientRect();
+      var x = e.clientX - vpRect.left + 16;
+      var y = e.clientY - vpRect.top + 16;
+      if (x + 260 > vpRect.width) x = Math.max(10, e.clientX - vpRect.left - 260);
+      if (y + 140 > vpRect.height) y = Math.max(10, e.clientY - vpRect.top - 140);
+      tooltip.style.left = x.toFixed(0) + "px";
+      tooltip.style.top = y.toFixed(0) + "px";
+    }
+  };
+
+  // Node Points Hover
+  var nodeEls = svg.querySelectorAll(".map-node-point");
+  for (var n = 0; n < nodeEls.length; n++) {
+    (function(el) {
+      el.addEventListener("mouseenter", function(e) {
+        var name = el.getAttribute("data-name") || "Recurso";
+        var purity = (el.getAttribute("data-purity") || "normal").toLowerCase();
+        var biome = el.getAttribute("data-biome") || "Desconocido";
+        var status = el.getAttribute("data-status") || "inactive";
+        var subfac = el.getAttribute("data-subfactory") || "";
+        var ueX = el.getAttribute("data-x") || "0";
+        var ueY = el.getAttribute("data-y") || "0";
+        var color = el.getAttribute("data-color") || "#FA9549";
+
+        var purityClass = "tt-purity-" + purity;
+        var purityLabel = purity.charAt(0).toUpperCase() + purity.slice(1);
+
+        var html = "<div class='tt-title'><span style='display:inline-block;width:9px;height:9px;border-radius:50%;background:" + color + ";'></span> " + name + "</div>";
+        html += "<div class='tt-row'>Pureza: <span class='" + purityClass + "'>" + purityLabel + "</span></div>";
+        html += "<div class='tt-row'>Bioma: <strong>" + biome + "</strong></div>";
+        html += "<div class='tt-row'>Coord UE: <code>(" + ueX + ", " + ueY + ")</code></div>";
+        if (status === "active") {
+          html += "<div class='tt-row' style='color:#00cec9;margin-top:4px;'>⛏️ <strong>ACTIVO:</strong> Asignado a " + subfac + "</div>";
+        } else {
+          html += "<div class='tt-row' style='color:#7f8c8d;margin-top:4px;'>💤 Inactivo / No asignado</div>";
+        }
+
+        showTooltip(html, e.clientX, e.clientY);
+        var dot = el.querySelector(".node-dot");
+        if (dot) {
+          dot.setAttribute("r", status === "active" ? "8" : "5");
+          dot.style.filter = "url(#radar-glow)";
+        }
+      });
+
+      el.addEventListener("mouseleave", function() {
+        hideTooltip();
+        var dot = el.querySelector(".node-dot");
+        var status = el.getAttribute("data-status") || "inactive";
+        if (dot) {
+          dot.setAttribute("r", status === "active" ? "5.5" : "2.8");
+          dot.style.filter = "none";
+        }
+      });
+    })(nodeEls[n]);
+  }
+
+  // Beacon Hover
+  var beacons = svg.querySelectorAll(".map-beacon-point");
+  for (var b = 0; b < beacons.length; b++) {
+    (function(el) {
+      el.addEventListener("mouseenter", function(e) {
+        var name = el.getAttribute("data-name") || "Sub-fábrica";
+        var biome = el.getAttribute("data-biome") || "";
+        var prods = el.getAttribute("data-prods") || "";
+        var raw = el.getAttribute("data-raw") || "";
+        var ue = el.getAttribute("data-ue") || "";
+
+        var html = "<div class='tt-title'>🏭 " + name + "</div>";
+        if (biome) html += "<div class='tt-row'>Ubicación: <strong>" + biome + "</strong></div>";
+        if (ue) html += "<div class='tt-row'>Centroide: <code>" + ue + "</code></div>";
+        if (prods) html += "<div class='tt-row' style='color:#FA9549;'>📦 <strong>Produce:</strong> " + prods + "</div>";
+        if (raw) html += "<div class='tt-row' style='color:#5dade2;'>⛏️ <strong>Requiere:</strong> " + raw + "</div>";
+
+        showTooltip(html, e.clientX, e.clientY);
+      });
+      el.addEventListener("mouseleave", hideTooltip);
+    })(beacons[b]);
+  }
+
+  // Route Lines Hover
+  var routes = svg.querySelectorAll(".map-route-line");
+  for (var r = 0; r < routes.length; r++) {
+    (function(el) {
+      el.addEventListener("mouseenter", function(e) {
+        var from = el.getAttribute("data-from") || "";
+        var to = el.getAttribute("data-to") || "";
+        var type = el.getAttribute("data-type-label") || "";
+        var dist = el.getAttribute("data-dist") || "";
+        var load = el.getAttribute("data-load") || "";
+
+        var html = "<div class='tt-title'>🚚 RUTA LOGÍSTICA</div>";
+        html += "<div class='tt-row'>Tramo: <strong>" + from + " ➔ " + to + "</strong></div>";
+        html += "<div class='tt-row'>Modo: <strong style='color:#00cec9;'>" + type + "</strong> (" + dist + "m)</div>";
+        html += "<div class='tt-row'>Carga: " + load + "</div>";
+
+        showTooltip(html, e.clientX, e.clientY);
+      });
+      el.addEventListener("mouseleave", hideTooltip);
+    })(routes[r]);
+  }
+  """.}
+
 proc renderApp*() =
   let app = document.getElementById(cstring("app"))
   if app == nil: return
@@ -801,6 +1259,7 @@ proc renderApp*() =
   case currentTab
   of "production": html.add(renderProductionTab())
   of "graph": html.add(renderGraphTab())
+  of "map": html.add(renderMapTab())
   of "alternates": html.add(renderAlternatesTab())
   of "database": html.add(renderDatabaseTab())
   else: html.add(renderProductionTab())
@@ -811,6 +1270,8 @@ proc renderApp*() =
 
   if currentTab == "graph" and graphViewMode == "svg":
     initGraphInteractions()
+  elif currentTab == "map" or (currentTab == "graph" and graphViewMode == "map"):
+    initMapInteractions()
 
 proc bindGlobalEvents*() =
   if eventsBound: return
@@ -939,6 +1400,26 @@ proc bindGlobalEvents*() =
       graphViewMode = "board"
       renderApp()
       return
+
+    let viewMapBtn = findClosest(target, cstring("#btn-view-map"))
+    if viewMapBtn != nil:
+      graphViewMode = "map"
+      renderApp()
+      return
+
+    # Select Sub-Factory Location Option (#1, #2, #3)
+    let optBtn = findClosest(target, cstring(".btn-select-location-opt"))
+    if optBtn != nil:
+      let modId = $optBtn.getAttribute(cstring("data-module-id"))
+      let optIdxStr = $optBtn.getAttribute(cstring("data-opt-idx"))
+      if modId != "" and optIdxStr != "":
+        try:
+          let optIdx = parseInt(optIdxStr)
+          selectedLocationOption[modId] = optIdx
+          renderApp()
+        except:
+          discard
+        return
 
     # Add Target button
     let addBtn = findClosest(target, cstring("#btn-add-target"))

@@ -1034,3 +1034,472 @@ body {
 .db-search {
   max-width: 320px;
 }
+
+/* ==========================================================================
+   FICSIT RADAR & SPATIAL MAP TAB (STAGE 5)
+   ========================================================================== */
+.map-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+.map-header-strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 14px 18px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.map-header-titles h3 {
+  margin: 0 0 4px 0;
+  font-size: 15px;
+  color: var(--primary-accent);
+}
+
+.map-header-metrics {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.metric-badge {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-color);
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.metric-badge strong {
+  color: var(--primary-accent);
+}
+
+.map-view-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+@media (max-width: 980px) {
+  .map-view-layout {
+    flex-direction: column;
+  }
+}
+
+.map-sidebar {
+  width: 440px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 820px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 980px) {
+  .map-sidebar {
+    width: 100%;
+    max-height: none;
+  }
+}
+
+.sidebar-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 0 2px;
+}
+
+.subfactory-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  transition: border-color 0.15s ease;
+}
+
+.subfactory-card:hover {
+  border-color: rgba(250, 149, 73, 0.4);
+}
+
+.subfactory-card.primary-mod {
+  border-left: 4px solid var(--primary-accent);
+}
+
+.subfactory-card.assembly-mod {
+  border-left: 4px solid #a29bfe;
+}
+
+.sf-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.sf-title {
+  font-size: 13.5px;
+  font-weight: 700;
+}
+
+.sf-pill {
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 8px;
+  border-radius: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sf-throughput-row {
+  font-size: 11.5px;
+  color: var(--text-main);
+  background: rgba(0, 0, 0, 0.2);
+  padding: 6px 10px;
+  border-radius: 5px;
+}
+
+.sf-raw-row {
+  color: #fab1a0;
+  border: 1px dashed rgba(250, 149, 73, 0.25);
+}
+
+.sf-opt-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.opt-selector-label {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.opt-btn-group {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.opt-btn {
+  background: #151d2a;
+  border: 1px solid #28374d;
+  color: var(--text-muted);
+  padding: 5px 10px;
+  font-size: 11px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex: 1;
+  min-width: 100px;
+  text-align: center;
+}
+
+.opt-btn:hover {
+  background: #1f2b3e;
+  color: #ffffff;
+  border-color: #3b5273;
+}
+
+.opt-btn.active {
+  background: var(--primary-accent);
+  border-color: var(--primary-accent);
+  color: #0c111a;
+  font-weight: 700;
+  box-shadow: 0 0 10px rgba(250, 149, 73, 0.35);
+}
+
+.sf-loc-details {
+  background: #090e17;
+  border: 1px solid #1c2738;
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.loc-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.badge-score {
+  color: #2ed573;
+  font-weight: 700;
+}
+
+.matched-nodes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nodes-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.node-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.node-chip {
+  background: #162235;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 10.5px;
+  color: #ecf0f1;
+}
+
+.loc-explanation {
+  font-size: 10.5px;
+  color: #a4b0be;
+  font-style: italic;
+  line-height: 1.4;
+  border-top: 1px solid #1c2738;
+  padding-top: 6px;
+}
+
+.map-stage {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.map-stage-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 8px 14px;
+  border-radius: 6px;
+}
+
+.map-stage-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--primary-accent);
+  letter-spacing: 1px;
+  font-family: var(--font-mono);
+}
+
+.map-stage-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.ficsit-map-viewport {
+  background: #0c111a;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  height: 680px;
+  width: 100%;
+  position: relative;
+  overflow: hidden;
+  box-shadow: inset 0 0 25px rgba(0, 0, 0, 0.7);
+}
+
+.ficsit-map-viewport svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.map-tactical-legend {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.legend-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.legend-header {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  min-width: 130px;
+}
+
+.mineral-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.mineral-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-main);
+}
+
+.mineral-chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.transport-pills {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.trans-pill {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-weight: 600;
+}
+
+.trans-belt {
+  background: rgba(250, 149, 73, 0.12);
+  border: 1px solid rgba(250, 149, 73, 0.35);
+  color: var(--primary-accent);
+}
+
+.trans-truck {
+  background: rgba(243, 156, 18, 0.12);
+  border: 1px solid rgba(243, 156, 18, 0.35);
+  color: #f39c12;
+}
+
+.trans-train {
+  background: rgba(0, 206, 201, 0.12);
+  border: 1px solid rgba(0, 206, 201, 0.35);
+  color: #00cec9;
+}
+
+/* Tactical Map Tooltip & Interactive Node Styling */
+.map-tactical-tooltip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 1000;
+  background: rgba(14, 21, 34, 0.95);
+  border: 1px solid var(--primary-accent);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: #ffffff;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.7), 0 0 12px rgba(250, 149, 73, 0.35);
+  max-width: 280px;
+  backdrop-filter: blur(4px);
+  line-height: 1.4;
+}
+
+.map-tactical-tooltip .tt-title {
+  font-weight: 700;
+  font-size: 12px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #ffffff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 4px;
+}
+
+.map-tactical-tooltip .tt-row {
+  margin-top: 3px;
+  color: #bdc3c7;
+  font-size: 10.5px;
+}
+
+.map-tactical-tooltip .tt-row strong {
+  color: #ffffff;
+}
+
+.map-tactical-tooltip .tt-row code {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: #00cec9;
+}
+
+.map-tactical-tooltip .tt-purity-pure {
+  color: #2ecc71;
+  font-weight: 700;
+  text-shadow: 0 0 6px rgba(46, 204, 113, 0.4);
+}
+
+.map-tactical-tooltip .tt-purity-normal {
+  color: #f1c40f;
+  font-weight: 700;
+}
+
+.map-tactical-tooltip .tt-purity-impure {
+  color: #e74c3c;
+  font-weight: 700;
+}
+
+.map-node-point {
+  cursor: pointer;
+}
+
+.map-node-point:hover .node-dot {
+  stroke-width: 2px !important;
+  stroke: #ffffff !important;
+}
+
+.map-beacon-point {
+  cursor: pointer;
+}
+
+.map-beacon-point:hover {
+  filter: drop-shadow(0 0 8px rgba(250, 149, 73, 0.8));
+}
+
+.map-route-line {
+  cursor: pointer;
+}
+
+.map-route-line:hover line:last-of-type {
+  stroke-width: 4px !important;
+  stroke: #ffffff !important;
+}
+
